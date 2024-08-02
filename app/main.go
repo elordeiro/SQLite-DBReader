@@ -12,12 +12,18 @@ func main() {
 	databaseFilePath := os.Args[1]
 	command := os.Args[2]
 
+	rootPage := ReadDatabaseFile(databaseFilePath)
+
 	switch command {
 	case ".dbinfo":
-		rootPage := ReadDatabaseFile(databaseFilePath)
-
 		fmt.Printf("database page size: %v\n", rootPage.Size)
 		fmt.Printf("number of tables: %v\n", GetTableCount(rootPage))
+	case ".tables":
+		tables := GetTableNames(rootPage)
+		for _, table := range tables {
+			fmt.Printf("%v ", table)
+		}
+		fmt.Println()
 	default:
 		fmt.Println("Unknown command", command)
 		os.Exit(1)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 )
 
 const (
@@ -109,13 +110,15 @@ func TraverseBTree(databaseFile *os.File, pageSize uint16, pageNumber uint32) *P
 		log.Fatal(err)
 	}
 
-	if page.Header.Type == InteriorTableBTreePage || page.Header.Type == InteriorIndexBTreePage {
-		for _, cell := range page.Cells {
-			childPageNumber := cell.LeftChildPointer
-			childPage := TraverseBTree(databaseFile, pageSize, childPageNumber)
-			page.Pages = append(page.Pages, childPage)
-		}
+	if page.Header.Type == LeafTableBTreePage || page.Header.Type == LeafIndexBTreePage {
+		return page
 	}
+
+	for _, cell := range page.Cells {
+		pageNumber := binary.BigEndian.Uint32(cell.Payload)
+		page.Pages = append(page.Pages, TraverseBTree(databaseFile, pageSize, pageNumber))
+	}
+
 	return page
 }
 
@@ -178,11 +181,11 @@ func ReadCellPtrs(offset int64, page *Page, file *os.File) error {
 	case LeafTableBTreePage:
 		err = ReadTableLeafCell(page, file)
 	case LeafIndexBTreePage:
-		err = ReadIndexLeafCell(page)
+		err = ReadIndexLeafCell(page, file)
 	case InteriorIndexBTreePage:
-		err = ReadIndexInteriorCell(page)
+		err = ReadIndexInteriorCell(page, file)
 	case InteriorTableBTreePage:
-		err = ReadTableInteriorCell(page)
+		err = ReadTableInteriorCell(page, file)
 	}
 	if err != nil {
 		return err
@@ -226,51 +229,102 @@ func ReadTableLeafCell(page *Page, file *os.File) error {
 	return nil
 }
 
-func ReadIndexLeafCell(page *Page) error {
-	// for i := 0; i < int(page.Header.CellCount); i++ {
-	// 	cell := &Cell{}
-	// 	payloadSize, n1 := binary.Uvarint(page.Raw[page.CellPtrs[i]:])
-	// 	if n1 <= 0 {
-	// 		fmt.Println("Failed to read varint")
-	// 		return fmt.Errorf("failed to read varint")
-	// 	}
-	// 	cell.PayloadSize = payloadSize
+/*
+Index B-Tree Leaf Cell (header 0x0a):
 
-	// 	cell.Payload = page.Raw[int(page.CellPtrs[i])+n1 : int(page.CellPtrs[i])+n1+int(cell.PayloadSize)]
+	A varint which is the total number of bytes of key payload, including any overflow
+	The initial portion of the payload that does not spill to overflow pages.
+	A 4-byte big-endian integer page number for the first page of the overflow page list - omitted if all payload fits on the b-tree page.
+*/
+func ReadIndexLeafCell(page *Page, file *os.File) error {
+	for i := 0; i < int(page.Header.CellCount); i++ {
+		cellPtr := page.CellPtrs[i]
+		buf := make([]byte, int(page.Size)-int(cellPtr))
+		file.ReadAt(buf, int64(cellPtr))
 
-	// 	page.Cells = append(page.Cells, cell)
-	// }
+		cell := &Cell{}
 
-	return nil
-}
+		// Read payload size
+		payloadSize, n := binary.Uvarint(buf)
+		cell.PayloadSize = payloadSize
 
-func ReadIndexInteriorCell(page *Page) error {
-	// for i := 0; i < int(page.Header.CellCount); i++ {
-	// 	cell := &Cell{}
-	// 	cell.LeftChildPointer = uint32(binary.BigEndian.Uint32(page.Raw[page.CellPtrs[i] : page.CellPtrs[i]+4]))
-	// 	payloadSize, n1 := binary.Uvarint(page.Raw[page.CellPtrs[i]+4:])
-	// 	if n1 <= 0 {
-	// 		fmt.Println("Failed to read varint")
-	// 		return fmt.Errorf("failed to read varint")
-	// 	}
-	// 	cell.PayloadSize = payloadSize
+		// Read payload
+		cell.Payload = make([]byte, cell.PayloadSize)
+		file.ReadAt(cell.Payload, int64(cellPtr)+int64(n))
 
-	// 	cell.Payload = page.Raw[int(page.CellPtrs[i])+4+n1 : int(page.CellPtrs[i])+4+n1+int(cell.PayloadSize)]
-
-	// 	page.Cells = append(page.Cells, cell)
-	// }
+		// Append cell to page cells
+		page.Cells = append(page.Cells, cell)
+	}
 
 	return nil
 }
 
-func ReadTableInteriorCell(page *Page) error {
-	// for i := 0; i < int(page.Header.CellCount); i++ {
-	// 	cell := &Cell{}
-	// 	cell.LeftChildPointer = uint32(binary.BigEndian.Uint32(page.Raw[page.CellPtrs[i] : page.CellPtrs[i]+4]))
-	// 	cell.RowID = uint64(binary.BigEndian.Uint32(page.Raw[page.CellPtrs[i]+4 : page.CellPtrs[i]+8]))
+/*
+Index B-Tree Interior Cell (header 0x02):
 
-	// 	page.Cells = append(page.Cells, cell)
-	// }
+	A 4-byte big-endian page number which is the left child pointer.
+	A varint which is the total number of bytes of key payload, including any overflow
+	The initial portion of the payload that does not spill to overflow pages.
+	A 4-byte big-endian integer page number for the first page of the overflow page list - omitted if all payload fits on the b-tree page.
+*/
+func ReadIndexInteriorCell(page *Page, file *os.File) error {
+	for i := 0; i < int(page.Header.CellCount); i++ {
+		cellPtr := page.CellPtrs[i]
+		buf := make([]byte, int(page.Size)-int(cellPtr))
+		file.ReadAt(buf, int64(cellPtr))
+
+		cell := &Cell{}
+
+		// Read left child pointer
+		err := binary.Read(bytes.NewReader(buf), binary.BigEndian, &cell.LeftChildPointer)
+		if err != nil {
+			fmt.Println("Failed to read integer:", err)
+			return err
+		}
+
+		// Read payload size
+		payloadSize, n := binary.Uvarint(buf[4:])
+		cell.PayloadSize = payloadSize
+
+		// Read payload
+		cell.Payload = make([]byte, cell.PayloadSize)
+		file.ReadAt(cell.Payload, int64(cellPtr)+int64(n+4))
+
+		// Append cell to page cells
+		page.Cells = append(page.Cells, cell)
+	}
+
+	return nil
+}
+
+/*
+Table B-Tree Interior Cell (header 0x05):
+
+	A 4-byte big-endian page number which is the left child pointer.
+	A varint which is the integer key
+*/
+func ReadTableInteriorCell(page *Page, file *os.File) error {
+	for i := 0; i < int(page.Header.CellCount); i++ {
+		cellPtr := page.CellPtrs[i]
+		buf := make([]byte, int(page.Size)-int(cellPtr))
+		file.ReadAt(buf, int64(cellPtr))
+
+		cell := &Cell{}
+
+		// Read left child pointer
+		err := binary.Read(bytes.NewReader(buf), binary.BigEndian, &cell.LeftChildPointer)
+		if err != nil {
+			fmt.Println("Failed to read integer:", err)
+			return err
+		}
+
+		// Read row ID
+		rowID, _ := binary.Uvarint(buf[4:])
+		cell.RowID = rowID
+
+		// Append cell to page cells
+		page.Cells = append(page.Cells, cell)
+	}
 
 	return nil
 }
@@ -286,4 +340,30 @@ func GetTableCount(rootPage *Page) int {
 	}
 
 	return count
+}
+
+func GetTableNames(rootPage *Page) []string {
+	if rootPage.Header.Type == LeafTableBTreePage {
+		var tableNames []string
+		for _, cell := range rootPage.Cells {
+			payload := string(cell.Payload)
+			idx := strings.Index(payload, "CREATE TABLE") + 13
+			if idx != -1 {
+				payload = strings.TrimSpace(payload[idx:strings.Index(payload, "(")])
+				if strings.Contains(payload, "sqlite_") {
+					continue
+				}
+				tableNames = append(tableNames, payload)
+			}
+		}
+
+		return tableNames
+	}
+
+	var tableNames []string
+	for _, childPage := range rootPage.Pages {
+		tableNames = append(tableNames, GetTableNames(childPage)...)
+	}
+
+	return tableNames
 }
