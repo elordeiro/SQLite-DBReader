@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 	// Available if you need it!
 	// "github.com/xwb1989/sqlparser"
 )
@@ -21,11 +22,15 @@ func main() {
 	case ".tables":
 		tables := GetTableNames(rootPage)
 		for _, table := range tables {
+			if strings.Contains(table, "sqlite_") {
+				continue
+			}
 			fmt.Printf("%v ", table)
 		}
 		fmt.Println()
 	default:
-		fmt.Println("Unknown command", command)
-		os.Exit(1)
+		fmt.Println(rootPage.ParseCommand(command))
 	}
+
+	rootPage.DbFile.Close()
 }

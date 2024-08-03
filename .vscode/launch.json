@@ -12,7 +12,7 @@
             "program": "${workspaceFolder}/app",
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
-            "args": ["sample.db", ".tables"]
+            "args": ["sample.db", "SELECT COUNT(*) FROM apples"]
         }
     ]
 }

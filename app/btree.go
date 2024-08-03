@@ -22,6 +22,7 @@ type Page struct {
 	CellPtrs []int16
 	Cells    []*Cell
 	Pages    []*Page
+	DbFile   *os.File
 }
 
 type Header struct {
@@ -69,7 +70,6 @@ func ReadDatabaseFile(databaseFilePath string) *Page {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer databaseFile.Close()
 
 	// Read database file header
 	header := make([]byte, 100)
@@ -95,6 +95,7 @@ func ReadDatabaseFile(databaseFilePath string) *Page {
 	}
 
 	rootPage := TraverseBTree(databaseFile, pageSize, 0)
+	rootPage.DbFile = databaseFile
 	return rootPage
 }
 
@@ -350,9 +351,6 @@ func GetTableNames(rootPage *Page) []string {
 			idx := strings.Index(payload, "CREATE TABLE") + 13
 			if idx != -1 {
 				payload = strings.TrimSpace(payload[idx:strings.Index(payload, "(")])
-				if strings.Contains(payload, "sqlite_") {
-					continue
-				}
 				tableNames = append(tableNames, payload)
 			}
 		}
@@ -366,4 +364,12 @@ func GetTableNames(rootPage *Page) []string {
 	}
 
 	return tableNames
+}
+
+func GetTableRowCount(i int, rootPage *Page) int {
+	pageNum := rootPage.Cells[i].RowID
+	offset := int64(pageNum) * int64(rootPage.Size)
+	os.Open(rootPage.DbFile.Name())
+	header := ReadHeader(offset, rootPage.DbFile)
+	return int(header.CellCount)
 }
