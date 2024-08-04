@@ -10,10 +10,11 @@ import (
 type SelectStatement struct {
 	Exprs *Expr
 	From  *From
+	Where *Where
 }
 
 type Expr struct {
-	Keyword  string
+	Args     Args
 	Function *Function
 }
 
@@ -28,12 +29,19 @@ type From struct {
 	Exprs *Expr
 }
 
+type Where struct {
+	Exprs *Expr
+}
+
 func ReadBeforeString(input string, delim string) (string, string) {
 	var delimIdx int
 	if delim == "END" {
 		delimIdx = len(input)
 	} else {
 		delimIdx = strings.Index(input, delim)
+		if delimIdx == -1 {
+			delimIdx = len(input)
+		}
 	}
 	result := strings.Trim(input[:delimIdx], " ")
 	input = strings.Trim(input[delimIdx:], " ")
@@ -42,15 +50,17 @@ func ReadBeforeString(input string, delim string) (string, string) {
 
 func ReadIncludingString(input string, delim string) (string, string) {
 	result, input := ReadBeforeString(input, delim)
+	if input == "" {
+		return "", ""
+	}
 	result = result + input[:len(delim)]
 	input = input[len(delim):]
 	return result, input
 }
 
 func ParseSelectStatement(input string) (*SelectStatement, error) {
-	SELECT, input := ReadIncludingString(input, "select")
-
-	if SELECT != "select" {
+	_, input = ReadIncludingString(input, "select")
+	if input == "" {
 		return nil, errors.New("expected SELECT")
 	}
 
@@ -59,11 +69,9 @@ func ParseSelectStatement(input string) (*SelectStatement, error) {
 		return nil, err
 	}
 
-	_, input = ReadBeforeString(input, "from")
-	FROM, input := ReadIncludingString(input, "from")
-
-	if FROM != "from" {
-		return nil, errors.New("expected select")
+	_, input = ReadIncludingString(input, "from")
+	if input == "" {
+		return nil, errors.New("expected FROM")
 	}
 
 	from, err := ParseFrom(input)
@@ -71,9 +79,19 @@ func ParseSelectStatement(input string) (*SelectStatement, error) {
 		return nil, err
 	}
 
+	_, input = ReadIncludingString(input, "where")
+	var where *Where
+	if input != "" {
+		where, err = ParseWhere(input)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return &SelectStatement{
 		Exprs: exprs,
 		From:  from,
+		Where: where,
 	}, nil
 }
 
@@ -87,7 +105,7 @@ func ParseExpr(input string) (*Expr, error) {
 			insideExpr := args[1 : len(args)-1]
 			args := strings.Split(insideExpr, ",")
 			return &Expr{
-				Keyword: insideExpr,
+				Args: strings.Split(insideExpr, ", "),
 				Function: &Function{
 					Name: "COUNT",
 					Args: args,
@@ -98,19 +116,27 @@ func ParseExpr(input string) (*Expr, error) {
 		}
 	}
 	return &Expr{
-		Keyword: expr,
+		Args: strings.Split(expr, ", "),
 	}, nil
 }
 
 func ParseFrom(input string) (*From, error) {
-	keyword, _ := ReadBeforeString(input, "END")
+	keyword, _ := ReadBeforeString(input, "where")
 
 	return &From{
 		Exprs: &Expr{
-			Keyword: strings.Trim(string(keyword), " "),
+			Args: strings.Split(strings.Trim(keyword, " "), " "),
 		},
 	}, nil
 
+}
+
+func ParseWhere(input string) (*Where, error) {
+	return &Where{
+		Exprs: &Expr{
+			Args: strings.Split(strings.Trim(input, " "), " "),
+		},
+	}, nil
 }
 
 func (page *Page) HandleCommand(input string) ([]string, error) {
@@ -118,7 +144,12 @@ func (page *Page) HandleCommand(input string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	table, err := page.GetTablebyName(stmt.From.Exprs.Keyword)
+
+	if len(stmt.From.Exprs.Args) != 1 {
+		return nil, errors.New("only FROM argument is currently supported")
+	}
+
+	table, err := page.GetTablebyName(stmt.From.Exprs.Args[0])
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +165,7 @@ func (page *Page) HandleCommand(input string) ([]string, error) {
 }
 
 func EvaluateStatement(rootPage *Page, table *Page, stmt *SelectStatement) ([]string, error) {
-	if stmt.Exprs.Keyword == "*" {
+	if stmt.Exprs.Args[0] == "*" {
 		var result []string
 		for _, cell := range table.Cells {
 			row := ""
@@ -146,12 +177,12 @@ func EvaluateStatement(rootPage *Page, table *Page, stmt *SelectStatement) ([]st
 		return result, nil
 	}
 
-	tableName := stmt.From.Exprs.Keyword
+	tableName := stmt.From.Exprs.Args[0]
 	cols, _ := rootPage.GetTableColumns(tableName)
 
-	result := make([][]string, table.Header.CellCount)
-	exprs := strings.Split(stmt.Exprs.Keyword, ", ")
-	for _, colName := range exprs {
+	rowCount := table.Header.CellCount
+	result := make([][]string, rowCount+1)
+	for _, colName := range stmt.Exprs.Args {
 		var colNum int
 		for i, col := range cols {
 			if strings.Contains(col, colName) {
@@ -167,15 +198,23 @@ func EvaluateStatement(rootPage *Page, table *Page, stmt *SelectStatement) ([]st
 			}
 			result[j] = append(result[j], string(row))
 		}
+		if result[rowCount] == nil {
+			result[rowCount] = make([]string, 0)
+		}
+		result[rowCount] = append(result[rowCount], colName)
 	}
 
-	flatResult := make([]string, table.Header.CellCount)
+	flatResult := make([]string, table.Header.CellCount+1)
 
 	for i, row := range result {
 		flatResult[i] = strings.Join(row, "|")
 	}
 
-	return flatResult, nil
+	if stmt.Where == nil {
+		return flatResult[:rowCount], nil
+	}
+
+	return EvaluateWhere(result, stmt)
 }
 
 func EvaluateFunction(result []string, stmt *SelectStatement) ([]string, error) {
@@ -185,4 +224,48 @@ func EvaluateFunction(result []string, stmt *SelectStatement) ([]string, error) 
 	default:
 		return nil, errors.New("function not yet implemented")
 	}
+}
+
+func EvaluateWhere(result [][]string, stmt *SelectStatement) ([]string, error) {
+	if len(stmt.Where.Exprs.Args) != 3 {
+		return nil, errors.New("malformed WHERE statement")
+	}
+	left := stmt.Where.Exprs.Args[0]
+	right := stmt.Where.Exprs.Args[2]
+
+	switch stmt.Where.Exprs.Args[1] {
+	case "=":
+		return FilterEqual(left, right, result)
+	default:
+		return nil, errors.New("WHERE operator not yet implemented")
+	}
+}
+
+func FilterEqual(left, right string, result [][]string) ([]string, error) {
+	right = strings.Trim(right, "'")
+	colNames := result[len(result)-1]
+	result = result[:len(result)-1]
+
+	var colIdx int
+	for i, colName := range colNames {
+		if colName == left {
+			colIdx = i
+			break
+		}
+	}
+
+	filteredResult := [][]string{}
+	for _, row := range result {
+		if strings.ToLower(row[colIdx]) == right {
+			filteredResult = append(filteredResult, row)
+		}
+	}
+
+	flatResult := make([]string, len(filteredResult))
+
+	for i, row := range filteredResult {
+		flatResult[i] = strings.Join(row, "|")
+	}
+
+	return flatResult, nil
 }
