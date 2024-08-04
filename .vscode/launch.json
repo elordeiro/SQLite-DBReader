@@ -12,7 +12,7 @@
             "program": "${workspaceFolder}/app",
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
-            "args": ["sample.db", "select name from apples"]
+            "args": ["sample.db", "select name, color from apples"]
             // "args": ["superheroes.db", "select name from superheroes"]
         }
     ]

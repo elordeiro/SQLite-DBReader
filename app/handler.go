@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"errors"
 	"strconv"
 	"strings"
@@ -29,31 +28,45 @@ type From struct {
 	Exprs *Expr
 }
 
-func ParseSelectStatement(input string) (*SelectStatement, error) {
-	buf := bufio.NewReader(strings.NewReader(input))
-	SELECT, err := buf.ReadBytes(' ')
-	if err != nil {
-		return nil, err
+func ReadBeforeString(input string, delim string) (string, string) {
+	var delimIdx int
+	if delim == "END" {
+		delimIdx = len(input)
+	} else {
+		delimIdx = strings.Index(input, delim)
 	}
-	if string(SELECT) != "select " {
+	result := strings.Trim(input[:delimIdx], " ")
+	input = strings.Trim(input[delimIdx:], " ")
+	return result, input
+}
+
+func ReadIncludingString(input string, delim string) (string, string) {
+	result, input := ReadBeforeString(input, delim)
+	result = result + input[:len(delim)]
+	input = input[len(delim):]
+	return result, input
+}
+
+func ParseSelectStatement(input string) (*SelectStatement, error) {
+	SELECT, input := ReadIncludingString(input, "select")
+
+	if SELECT != "select" {
 		return nil, errors.New("expected SELECT")
 	}
 
-	exprs, err := ParseExpr(buf)
+	exprs, err := ParseExpr(input)
 	if err != nil {
 		return nil, err
 	}
 
-	FROM, err := buf.ReadBytes(' ')
-	if err != nil {
-		return nil, err
-	}
+	_, input = ReadBeforeString(input, "from")
+	FROM, input := ReadIncludingString(input, "from")
 
-	if string(FROM) != "from " {
+	if FROM != "from" {
 		return nil, errors.New("expected select")
 	}
 
-	from, err := ParseFrom(buf)
+	from, err := ParseFrom(input)
 	if err != nil {
 		return nil, err
 	}
@@ -64,18 +77,14 @@ func ParseSelectStatement(input string) (*SelectStatement, error) {
 	}, nil
 }
 
-func ParseExpr(buf *bufio.Reader) (*Expr, error) {
-	exprBytes, err := buf.ReadBytes(' ')
-	if err != nil {
-		return nil, err
-	}
-	expr := strings.Trim(string(exprBytes), " ")
+func ParseExpr(input string) (*Expr, error) {
+	expr, _ := ReadBeforeString(input, "from")
+
 	if strings.Contains(expr, "(") {
-		openParenIdx := strings.Index(expr, "(")
-		function := expr[:openParenIdx]
-		switch function {
+		functionName, args := ReadBeforeString(expr, "(")
+		switch functionName {
 		case "count":
-			insideExpr := expr[openParenIdx+1 : strings.Index(expr, ")")]
+			insideExpr := args[1 : len(args)-1]
 			args := strings.Split(insideExpr, ",")
 			return &Expr{
 				Keyword: insideExpr,
@@ -93,11 +102,8 @@ func ParseExpr(buf *bufio.Reader) (*Expr, error) {
 	}, nil
 }
 
-func ParseFrom(buf *bufio.Reader) (*From, error) {
-	keyword, err := buf.ReadBytes(' ')
-	if err != nil && err.Error() != "EOF" {
-		return nil, err
-	}
+func ParseFrom(input string) (*From, error) {
+	keyword, _ := ReadBeforeString(input, "END")
 
 	return &From{
 		Exprs: &Expr{
@@ -139,33 +145,37 @@ func EvaluateStatement(rootPage *Page, table *Page, stmt *SelectStatement) ([]st
 		}
 		return result, nil
 	}
+
 	tableName := stmt.From.Exprs.Keyword
 	cols, _ := rootPage.GetTableColumns(tableName)
-	var colNum int
-	colName := stmt.Exprs.Keyword
-	for i, col := range cols {
-		if strings.Contains(col, colName) {
-			colNum = i
-			break
+
+	result := make([][]string, table.Header.CellCount)
+	exprs := strings.Split(stmt.Exprs.Keyword, ", ")
+	for _, colName := range exprs {
+		var colNum int
+		for i, col := range cols {
+			if strings.Contains(col, colName) {
+				colNum = i
+				break
+			}
+		}
+
+		for j, cell := range table.Cells {
+			row := cell.Record.Keys[colNum]
+			if result[j] == nil {
+				result[j] = make([]string, 0)
+			}
+			result[j] = append(result[j], string(row))
 		}
 	}
 
-	// for i, col := range cols {
-	// 	if i >= colNum {
-	// 		break
-	// 	}
-	// 	if strings.Contains(col, "autoincrement") {
-	// 		colNum--
-	// 		break
-	// 	}
-	// }
+	flatResult := make([]string, table.Header.CellCount)
 
-	var result []string
-	for _, cell := range table.Cells {
-		row := cell.Record.Keys[colNum]
-		result = append(result, string(row))
+	for i, row := range result {
+		flatResult[i] = strings.Join(row, "|")
 	}
-	return result, nil
+
+	return flatResult, nil
 }
 
 func EvaluateFunction(result []string, stmt *SelectStatement) ([]string, error) {
