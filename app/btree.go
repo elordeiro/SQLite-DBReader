@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -19,6 +20,8 @@ const (
 type Page struct {
 	Header   *Header
 	Size     uint16
+	Offset   int64
+	PageNum  uint64
 	CellPtrs []int16
 	Cells    []*Cell
 	Pages    []*Page
@@ -37,7 +40,14 @@ type Cell struct {
 	RowID            uint64 // Used for: TableLeafCell, TableInteriorCell
 	PayloadSize      uint64 // Used for: TableLeafCell, IndexLeafCell, IndexInteriorCell
 	Payload          []byte // Used for: TableLeafCell, IndexLeafCell, IndexInteriorCell
-	// PayloadSizeOffset int32  // Used for: IndexLeafCell, IndexLeafCell, IndexInteriorCell
+	Record           *Record
+}
+
+type Record struct {
+	HeaderSize  uint64    // Part of Header
+	ColumnTypes []uint64  // Part of Header
+	Keys        [][]uint8 // Part of Body
+	RowID       int64     // Part of Body -- Not present in table leaf cells
 }
 
 func NewHeader(pageType uint8) *Header {
@@ -56,9 +66,12 @@ func NewHeader(pageType uint8) *Header {
 	return header
 }
 
-func NewPage(header *Header) *Page {
+func NewPage(size uint16, offset int64, pageNum uint64, header *Header) *Page {
 	page := &Page{
-		Header: header,
+		Size:    size,
+		Offset:  offset,
+		PageNum: pageNum,
+		Header:  header,
 	}
 
 	return page
@@ -95,18 +108,20 @@ func ReadDatabaseFile(databaseFilePath string) *Page {
 	}
 
 	rootPage := TraverseBTree(databaseFile, pageSize, 0)
-	rootPage.DbFile = databaseFile
 	return rootPage
 }
 
-func TraverseBTree(databaseFile *os.File, pageSize uint16, pageNumber uint32) *Page {
-	offset := int64(pageNumber)*int64(pageSize) + 100
+func TraverseBTree(databaseFile *os.File, pageSize uint16, pageNumber uint64) *Page {
+	offset := int64(pageNumber) * int64(pageSize)
+	if pageNumber == 0 {
+		offset = 100
+	}
 
 	header := ReadHeader(offset, databaseFile)
-	page := NewPage(header)
-	page.Size = pageSize
+	page := NewPage(pageSize, offset, pageNumber, header)
+	page.DbFile = databaseFile
 
-	err := ReadCellPtrs(offset, page, databaseFile)
+	err := ReadCellPtrs(page)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -116,7 +131,7 @@ func TraverseBTree(databaseFile *os.File, pageSize uint16, pageNumber uint32) *P
 	}
 
 	for _, cell := range page.Cells {
-		pageNumber := binary.BigEndian.Uint32(cell.Payload)
+		pageNumber := binary.BigEndian.Uint64(cell.Payload)
 		page.Pages = append(page.Pages, TraverseBTree(databaseFile, pageSize, pageNumber))
 	}
 
@@ -155,20 +170,20 @@ func ReadHeader(offset int64, file *os.File) *Header {
 	return header
 }
 
-func ReadCellPtrs(offset int64, page *Page, file *os.File) error {
+func ReadCellPtrs(page *Page) error {
 	// Read cell pointers
 	page.CellPtrs = make([]int16, page.Header.CellCount)
 	var arrayStart int
 	if page.Header.Type == InteriorTableBTreePage || page.Header.Type == InteriorIndexBTreePage {
-		arrayStart = int(offset) + 12
+		arrayStart = int(page.Offset) + 12
 	} else {
-		arrayStart = int(offset) + 8
+		arrayStart = int(page.Offset) + 8
 	}
 
-	file.Seek(int64(arrayStart), 0)
+	page.DbFile.Seek(int64(arrayStart), 0)
 	for i := 0; i < int(page.Header.CellCount); i++ {
 		var cellPtr int16
-		err := binary.Read(file, binary.BigEndian, &cellPtr)
+		err := binary.Read(page.DbFile, binary.BigEndian, &cellPtr)
 		if err != nil {
 			fmt.Println("Failed to read integer:", err)
 			return err
@@ -180,13 +195,13 @@ func ReadCellPtrs(offset int64, page *Page, file *os.File) error {
 	var err error
 	switch page.Header.Type {
 	case LeafTableBTreePage:
-		err = ReadTableLeafCell(page, file)
+		err = ReadTableLeafCell(page)
 	case LeafIndexBTreePage:
-		err = ReadIndexLeafCell(page, file)
+		err = ReadIndexLeafCell(page)
 	case InteriorIndexBTreePage:
-		err = ReadIndexInteriorCell(page, file)
+		err = ReadIndexInteriorCell(page)
 	case InteriorTableBTreePage:
-		err = ReadTableInteriorCell(page, file)
+		err = ReadTableInteriorCell(page)
 	}
 	if err != nil {
 		return err
@@ -203,11 +218,17 @@ Table B-Tree Leaf Cell (header 0x0d):
 	The initial portion of the payload that does not spill to overflow pages.
 	A 4-byte big-endian integer page number for the first page of the overflow page list - omitted if all payload fits on the b-tree page.
 */
-func ReadTableLeafCell(page *Page, file *os.File) error {
+func ReadTableLeafCell(page *Page) error {
+	var offset int64
+	if page.PageNum == 0 {
+		offset = 0
+	} else {
+		offset = page.Offset
+	}
 	for i := 0; i < int(page.Header.CellCount); i++ {
-		cellPtr := page.CellPtrs[i]
-		buf := make([]byte, int(page.Size)-int(cellPtr))
-		file.ReadAt(buf, int64(cellPtr))
+		cellPtr := page.CellPtrs[i] + int16(offset)
+		buf := make([]byte, int(page.Size)-(int(cellPtr)%int(page.Size)))
+		page.DbFile.ReadAt(buf, int64(cellPtr))
 
 		cell := &Cell{}
 
@@ -221,7 +242,7 @@ func ReadTableLeafCell(page *Page, file *os.File) error {
 
 		// Read payload
 		cell.Payload = make([]byte, cell.PayloadSize)
-		file.ReadAt(cell.Payload, int64(cellPtr)+int64(n+n1))
+		page.DbFile.ReadAt(cell.Payload, int64(cellPtr)+int64(n+n1))
 
 		// Append cell to page cells
 		page.Cells = append(page.Cells, cell)
@@ -237,11 +258,11 @@ Index B-Tree Leaf Cell (header 0x0a):
 	The initial portion of the payload that does not spill to overflow pages.
 	A 4-byte big-endian integer page number for the first page of the overflow page list - omitted if all payload fits on the b-tree page.
 */
-func ReadIndexLeafCell(page *Page, file *os.File) error {
+func ReadIndexLeafCell(page *Page) error {
 	for i := 0; i < int(page.Header.CellCount); i++ {
 		cellPtr := page.CellPtrs[i]
 		buf := make([]byte, int(page.Size)-int(cellPtr))
-		file.ReadAt(buf, int64(cellPtr))
+		page.DbFile.ReadAt(buf, int64(cellPtr))
 
 		cell := &Cell{}
 
@@ -251,7 +272,7 @@ func ReadIndexLeafCell(page *Page, file *os.File) error {
 
 		// Read payload
 		cell.Payload = make([]byte, cell.PayloadSize)
-		file.ReadAt(cell.Payload, int64(cellPtr)+int64(n))
+		page.DbFile.ReadAt(cell.Payload, int64(cellPtr)+int64(n))
 
 		// Append cell to page cells
 		page.Cells = append(page.Cells, cell)
@@ -268,11 +289,11 @@ Index B-Tree Interior Cell (header 0x02):
 	The initial portion of the payload that does not spill to overflow pages.
 	A 4-byte big-endian integer page number for the first page of the overflow page list - omitted if all payload fits on the b-tree page.
 */
-func ReadIndexInteriorCell(page *Page, file *os.File) error {
+func ReadIndexInteriorCell(page *Page) error {
 	for i := 0; i < int(page.Header.CellCount); i++ {
 		cellPtr := page.CellPtrs[i]
 		buf := make([]byte, int(page.Size)-int(cellPtr))
-		file.ReadAt(buf, int64(cellPtr))
+		page.DbFile.ReadAt(buf, int64(cellPtr))
 
 		cell := &Cell{}
 
@@ -289,7 +310,7 @@ func ReadIndexInteriorCell(page *Page, file *os.File) error {
 
 		// Read payload
 		cell.Payload = make([]byte, cell.PayloadSize)
-		file.ReadAt(cell.Payload, int64(cellPtr)+int64(n+4))
+		page.DbFile.ReadAt(cell.Payload, int64(cellPtr)+int64(n+4))
 
 		// Append cell to page cells
 		page.Cells = append(page.Cells, cell)
@@ -304,11 +325,11 @@ Table B-Tree Interior Cell (header 0x05):
 	A 4-byte big-endian page number which is the left child pointer.
 	A varint which is the integer key
 */
-func ReadTableInteriorCell(page *Page, file *os.File) error {
+func ReadTableInteriorCell(page *Page) error {
 	for i := 0; i < int(page.Header.CellCount); i++ {
 		cellPtr := page.CellPtrs[i]
 		buf := make([]byte, int(page.Size)-int(cellPtr))
-		file.ReadAt(buf, int64(cellPtr))
+		page.DbFile.ReadAt(buf, int64(cellPtr))
 
 		cell := &Cell{}
 
@@ -330,23 +351,27 @@ func ReadTableInteriorCell(page *Page, file *os.File) error {
 	return nil
 }
 
-func GetTableCount(rootPage *Page) int {
+func (rootPage *Page) GetPageSize() int {
+	return int(rootPage.Size)
+}
+
+func (rootPage *Page) GetTableCount() int {
 	if rootPage.Header.Type == LeafTableBTreePage {
 		return len(rootPage.Cells)
 	}
 
 	var count int
 	for _, childPage := range rootPage.Pages {
-		count += GetTableCount(childPage)
+		count += childPage.GetTableCount()
 	}
 
 	return count
 }
 
-func GetTableNames(rootPage *Page) []string {
-	if rootPage.Header.Type == LeafTableBTreePage {
+func (page *Page) GetTableNames() []string {
+	if page.Header.Type == LeafTableBTreePage {
 		var tableNames []string
-		for _, cell := range rootPage.Cells {
+		for _, cell := range page.Cells {
 			payload := string(cell.Payload)
 			idx := strings.Index(payload, "CREATE TABLE") + 13
 			if idx != -1 {
@@ -359,17 +384,131 @@ func GetTableNames(rootPage *Page) []string {
 	}
 
 	var tableNames []string
-	for _, childPage := range rootPage.Pages {
-		tableNames = append(tableNames, GetTableNames(childPage)...)
+	for _, childPage := range page.Pages {
+		tableNames = append(tableNames, childPage.GetTableNames()...)
 	}
 
 	return tableNames
 }
 
-func GetTableRowCount(i int, rootPage *Page) int {
-	pageNum := rootPage.Cells[i].RowID
-	offset := int64(pageNum) * int64(rootPage.Size)
-	os.Open(rootPage.DbFile.Name())
-	header := ReadHeader(offset, rootPage.DbFile)
-	return int(header.CellCount)
+func (page *Page) GetTablePageNumber(name string) (uint64, error) {
+	if page.Header.Type != LeafTableBTreePage {
+		return 0, errors.New("not a table page")
+	}
+
+	var pageNum uint64
+	tableNames := page.GetTableNames()
+	for i, tableName := range tableNames {
+		if strings.Trim(tableName, "\"") == name {
+			pageNum = page.Cells[i].RowID
+			break
+		}
+	}
+
+	return pageNum, nil
+}
+
+func (page *Page) GetPageByName(name string) (*Page, error) {
+	pageNum, err := page.GetTablePageNumber(name)
+	if err != nil {
+		return nil, err
+	}
+
+	offset := int64(pageNum) * int64(page.Size)
+	header := ReadHeader(offset, page.DbFile)
+	newPage := NewPage(page.Size, offset, pageNum, header)
+	newPage.DbFile = page.DbFile
+
+	return newPage, nil
+}
+
+func ReadRecord(numCols int, cell *Cell) error {
+	record := &Record{
+		Keys: make([][]uint8, 0),
+	}
+
+	// Read header size
+	headerSize, n := binary.Uvarint(cell.Payload)
+	record.HeaderSize = headerSize
+
+	// Read column types
+	for range numCols {
+		colType, n1 := binary.Uvarint(cell.Payload[n:])
+		record.ColumnTypes = append(record.ColumnTypes, colType)
+		n += n1
+	}
+
+	// Read keys assuming they are strings
+	for i := range numCols {
+		if record.ColumnTypes[i] == 0 {
+			record.Keys = append(record.Keys, []byte{0})
+			continue
+		}
+		keyLen := (record.ColumnTypes[i] - 13) / 2
+		record.Keys = append(record.Keys, cell.Payload[n:n+int(keyLen)])
+		n += int(keyLen)
+	}
+
+	cell.Record = record
+	return nil
+}
+
+func (page *Page) GetTableColumns(name string) ([]string, error) {
+	if page.Header.Type != LeafTableBTreePage {
+		return nil, errors.New("not a table page")
+	}
+
+	tableNames := page.GetTableNames()
+	var rowNum int
+	for i, tableName := range tableNames {
+		if strings.Trim(tableName, "\"") == name {
+			rowNum = i
+			break
+		}
+	}
+
+	payload := page.Cells[rowNum].Payload
+	payloadStr := string(payload)
+
+	startIdx := strings.Index(payloadStr, "(")
+	if startIdx == -1 {
+		return nil, errors.New("could not find columns")
+	}
+
+	columns := strings.Split(payloadStr[startIdx+1:strings.Index(payloadStr, ")")], ",")
+	for i, column := range columns {
+		columns[i] = strings.TrimSpace(column)
+	}
+
+	return columns, nil
+}
+
+func (page *Page) GetTablebyName(name string) (*Page, error) {
+	if page.Header.Type != LeafTableBTreePage {
+		return nil, errors.New("not a table page")
+	}
+
+	newPage, err := page.GetPageByName(name)
+	if err != nil {
+		return nil, err
+	}
+
+	err = ReadCellPtrs(newPage)
+	if err != nil {
+		return nil, err
+	}
+
+	columns, err := page.GetTableColumns(name)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, cell := range newPage.Cells {
+		err = ReadRecord(len(columns), cell)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return newPage, nil
 }

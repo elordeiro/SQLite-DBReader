@@ -12,7 +12,8 @@
             "program": "${workspaceFolder}/app",
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
-            "args": ["sample.db", "SELECT COUNT(*) FROM apples"]
+            "args": ["sample.db", "select name from apples"]
+            // "args": ["superheroes.db", "select name from superheroes"]
         }
     ]
 }

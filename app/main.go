@@ -2,10 +2,9 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strings"
-	// Available if you need it!
-	// "github.com/xwb1989/sqlparser"
 )
 
 // Usage: your_program.sh sample.db .dbinfo
@@ -17,10 +16,10 @@ func main() {
 
 	switch command {
 	case ".dbinfo":
-		fmt.Printf("database page size: %v\n", rootPage.Size)
-		fmt.Printf("number of tables: %v\n", GetTableCount(rootPage))
+		fmt.Printf("database page size: %v\n", rootPage.GetPageSize())
+		fmt.Printf("number of tables: %v\n", rootPage.GetTableCount())
 	case ".tables":
-		tables := GetTableNames(rootPage)
+		tables := rootPage.GetTableNames()
 		for _, table := range tables {
 			if strings.Contains(table, "sqlite_") {
 				continue
@@ -29,7 +28,13 @@ func main() {
 		}
 		fmt.Println()
 	default:
-		fmt.Println(rootPage.ParseCommand(command))
+		result, err := rootPage.HandleCommand(command)
+		if err != nil {
+			log.Fatal(err)
+		}
+		for _, res := range result {
+			fmt.Println(res)
+		}
 	}
 
 	rootPage.DbFile.Close()
