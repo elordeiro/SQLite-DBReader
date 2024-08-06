@@ -19,7 +19,7 @@ func main() {
 		fmt.Printf("database page size: %v\n", rootPage.GetPageSize())
 		fmt.Printf("number of tables: %v\n", rootPage.GetTableCount())
 	case ".tables":
-		tables := rootPage.GetTableNames()
+		tables, _ := rootPage.GetTableNames()
 		for _, table := range tables {
 			if strings.Contains(table, "sqlite_") {
 				continue

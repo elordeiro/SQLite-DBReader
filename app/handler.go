@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	// "github.com/xwb1989/sqlparser"
@@ -132,9 +133,13 @@ func ParseFrom(input string) (*From, error) {
 }
 
 func ParseWhere(input string) (*Where, error) {
+	args := strings.SplitAfterN(strings.Trim(input, " "), " ", 3)
+	for i, arg := range args {
+		args[i] = strings.TrimSpace(arg)
+	}
 	return &Where{
 		Exprs: &Expr{
-			Args: strings.Split(strings.Trim(input, " "), " "),
+			Args: args,
 		},
 	}, nil
 }
@@ -178,43 +183,21 @@ func EvaluateStatement(rootPage *Page, table *Page, stmt *SelectStatement) ([]st
 	}
 
 	tableName := stmt.From.Exprs.Args[0]
-	cols, _ := rootPage.GetTableColumns(tableName)
+	cols, _ := rootPage.GetTableColumnNames(tableName)
 
-	rowCount := table.Header.CellCount
-	result := make([][]string, rowCount+1)
-	for _, colName := range stmt.Exprs.Args {
-		var colNum int
-		for i, col := range cols {
-			if strings.Contains(col, colName) {
-				colNum = i
-				break
-			}
-		}
-
-		for j, cell := range table.Cells {
-			row := cell.Record.Keys[colNum]
-			if result[j] == nil {
-				result[j] = make([]string, 0)
-			}
-			result[j] = append(result[j], string(row))
-		}
-		if result[rowCount] == nil {
-			result[rowCount] = make([]string, 0)
-		}
-		result[rowCount] = append(result[rowCount], colName)
-	}
-
-	flatResult := make([]string, table.Header.CellCount+1)
-
-	for i, row := range result {
-		flatResult[i] = strings.Join(row, "|")
-	}
+	result := table.GetTableColumns(cols)
+	result = append(result, cols)
 
 	if stmt.Where == nil {
-		return flatResult[:rowCount], nil
+		return FlattenResult(SelectColumns(result, stmt)), nil
 	}
 
-	return EvaluateWhere(result, stmt)
+	result, err := EvaluateWhere(result, stmt)
+	if err != nil {
+		return nil, err
+	}
+
+	return FlattenResult(SelectColumns(result, stmt)), nil
 }
 
 func EvaluateFunction(result []string, stmt *SelectStatement) ([]string, error) {
@@ -226,7 +209,7 @@ func EvaluateFunction(result []string, stmt *SelectStatement) ([]string, error) 
 	}
 }
 
-func EvaluateWhere(result [][]string, stmt *SelectStatement) ([]string, error) {
+func EvaluateWhere(result [][]string, stmt *SelectStatement) ([][]string, error) {
 	if len(stmt.Where.Exprs.Args) != 3 {
 		return nil, errors.New("malformed WHERE statement")
 	}
@@ -241,14 +224,14 @@ func EvaluateWhere(result [][]string, stmt *SelectStatement) ([]string, error) {
 	}
 }
 
-func FilterEqual(left, right string, result [][]string) ([]string, error) {
+func FilterEqual(left, right string, result [][]string) ([][]string, error) {
 	right = strings.Trim(right, "'")
 	colNames := result[len(result)-1]
 	result = result[:len(result)-1]
 
 	var colIdx int
 	for i, colName := range colNames {
-		if colName == left {
+		if strings.Contains(colName, left) {
 			colIdx = i
 			break
 		}
@@ -260,12 +243,39 @@ func FilterEqual(left, right string, result [][]string) ([]string, error) {
 			filteredResult = append(filteredResult, row)
 		}
 	}
+	filteredResult = append(filteredResult, colNames)
+	return filteredResult, nil
+}
 
-	flatResult := make([]string, len(filteredResult))
+func SelectColumns(result [][]string, stmt *SelectStatement) [][]string {
+	colNames := result[len(result)-1]
+	result = result[:len(result)-1]
 
-	for i, row := range filteredResult {
-		flatResult[i] = strings.Join(row, "|")
+	selectedResult := make([][]string, len(result))
+	colsWanted := stmt.Exprs.Args
+
+	for _, colName := range colsWanted {
+		colIdx := slices.IndexFunc(colNames, func(col string) bool {
+			return strings.Contains(col, colName)
+		})
+		if colIdx == -1 {
+			continue
+		}
+
+		for i, row := range result {
+			if selectedResult[i] == nil {
+				selectedResult[i] = make([]string, 0)
+			}
+			selectedResult[i] = append(selectedResult[i], row[colIdx])
+		}
 	}
+	return selectedResult
+}
 
-	return flatResult, nil
+func FlattenResult(rows [][]string) []string {
+	result := make([]string, len(rows))
+	for i, row := range rows {
+		result[i] = strings.Join(row, "|")
+	}
+	return result
 }

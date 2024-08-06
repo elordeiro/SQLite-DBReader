@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -23,6 +24,7 @@ type Page struct {
 	Offset   int64
 	PageNum  uint64
 	CellPtrs []int16
+	Tables   []*Table
 	Cells    []*Cell
 	Pages    []*Page
 	DbFile   *os.File
@@ -48,6 +50,12 @@ type Record struct {
 	ColumnTypes []uint64  // Part of Header
 	Keys        [][]uint8 // Part of Body
 	RowID       int64     // Part of Body -- Not present in table leaf cells
+}
+
+type Table struct {
+	Name     string
+	PageNum  int
+	ColNames []string
 }
 
 func NewHeader(pageType uint8) *Header {
@@ -107,13 +115,13 @@ func ReadDatabaseFile(databaseFilePath string) *Page {
 		return nil
 	}
 
-	rootPage := TraverseBTree(databaseFile, pageSize, 0)
+	rootPage := TraverseBTree(databaseFile, pageSize, 1)
 	return rootPage
 }
 
 func TraverseBTree(databaseFile *os.File, pageSize uint16, pageNumber uint64) *Page {
-	offset := int64(pageNumber) * int64(pageSize)
-	if pageNumber == 0 {
+	offset := int64(pageNumber-1) * int64(pageSize)
+	if pageNumber == 1 {
 		offset = 100
 	}
 
@@ -130,9 +138,10 @@ func TraverseBTree(databaseFile *os.File, pageSize uint16, pageNumber uint64) *P
 		return page
 	}
 
+	page.Pages = make([]*Page, 0)
 	for _, cell := range page.Cells {
-		pageNumber := binary.BigEndian.Uint64(cell.Payload)
-		page.Pages = append(page.Pages, TraverseBTree(databaseFile, pageSize, pageNumber))
+		childPage := TraverseBTree(databaseFile, pageSize, uint64(cell.LeftChildPointer))
+		page.Pages = append(page.Pages, childPage)
 	}
 
 	return page
@@ -219,14 +228,14 @@ Table B-Tree Leaf Cell (header 0x0d):
 	A 4-byte big-endian integer page number for the first page of the overflow page list - omitted if all payload fits on the b-tree page.
 */
 func ReadTableLeafCell(page *Page) error {
-	var offset int64
-	if page.PageNum == 0 {
+	offset := page.Offset
+	if page.PageNum == 1 {
 		offset = 0
-	} else {
-		offset = page.Offset
 	}
-	for i := 0; i < int(page.Header.CellCount); i++ {
-		cellPtr := page.CellPtrs[i] + int16(offset)
+
+	cellCount := int(page.Header.CellCount)
+	for i := 0; i < cellCount; i++ {
+		cellPtr := int64(page.CellPtrs[i]) + offset
 		buf := make([]byte, int(page.Size)-(int(cellPtr)%int(page.Size)))
 		page.DbFile.ReadAt(buf, int64(cellPtr))
 
@@ -237,18 +246,76 @@ func ReadTableLeafCell(page *Page) error {
 		cell.PayloadSize = payloadSize
 
 		// Read row ID
-		rowID, n1 := binary.Uvarint(buf[n:])
+		rowID, n1 := ReadVarInt(buf[n:])
 		cell.RowID = rowID
 
-		// Read payload
-		cell.Payload = make([]byte, cell.PayloadSize)
-		page.DbFile.ReadAt(cell.Payload, int64(cellPtr)+int64(n+n1))
+		// Read Record
+		buf = buf[n+n1:]
+		cell.Record = ReadRecord(buf)
+
+		for _, record := range cell.Record.Keys {
+			if strings.Contains(string(record), "Stealth") {
+				x := 0
+				_ = x
+			}
+		}
 
 		// Append cell to page cells
 		page.Cells = append(page.Cells, cell)
+
+		if page.PageNum == 1 {
+			page.Tables = append(page.Tables, &Table{
+				Name:     string(cell.Record.Keys[1]),
+				PageNum:  bytesToInt(cell.Record.Keys[3]),
+				ColNames: parseColNames(cell.Record.Keys[4]),
+			})
+		}
 	}
 
 	return nil
+}
+
+// Little-endian
+// func ReadVarInt(buf []byte) (uint64, int) {
+// 	result := uint64(0)
+// 	for i, b := range buf {
+// 		result |= uint64(b&0x7f) << uint(i*7)
+// 		if b&0x80 == 0 {
+// 			return result, i + 1
+// 		}
+// 	}
+// 	return result, 0
+// }
+
+// Big-endian
+func ReadVarInt(buf []byte) (uint64, int) {
+	result := uint64(0)
+	for i, b := range buf {
+		result <<= 7
+		result |= uint64(b & 0x7f)
+		if b&0x80 == 0 {
+			return result, i + 1
+		}
+	}
+	return result, 0
+}
+
+func bytesToInt(bytes []byte) int {
+	var result int
+	for _, b := range bytes {
+		result = (result << 8) | int(b)
+	}
+	return result
+}
+
+func parseColNames(bytes []byte) []string {
+	exprStr := string(bytes)
+	insideExpr := exprStr[strings.Index(exprStr, "(")+1 : strings.Index(exprStr, ")")]
+	result := strings.Split(insideExpr, ",")
+	for i, res := range result {
+		result[i] = strings.TrimSpace(res)
+	}
+	return result
 }
 
 /*
@@ -326,9 +393,12 @@ Table B-Tree Interior Cell (header 0x05):
 	A varint which is the integer key
 */
 func ReadTableInteriorCell(page *Page) error {
+	offset := page.Offset
+
 	for i := 0; i < int(page.Header.CellCount); i++ {
-		cellPtr := page.CellPtrs[i]
+		cellPtr := int64(page.CellPtrs[i])
 		buf := make([]byte, int(page.Size)-int(cellPtr))
+		cellPtr += offset
 		page.DbFile.ReadAt(buf, int64(cellPtr))
 
 		cell := &Cell{}
@@ -357,7 +427,7 @@ func (rootPage *Page) GetPageSize() int {
 
 func (rootPage *Page) GetTableCount() int {
 	if rootPage.Header.Type == LeafTableBTreePage {
-		return len(rootPage.Cells)
+		return len(rootPage.Tables)
 	}
 
 	var count int
@@ -368,44 +438,31 @@ func (rootPage *Page) GetTableCount() int {
 	return count
 }
 
-func (page *Page) GetTableNames() []string {
-	if page.Header.Type == LeafTableBTreePage {
-		var tableNames []string
-		for _, cell := range page.Cells {
-			payload := string(cell.Payload)
-			idx := strings.Index(payload, "CREATE TABLE") + 13
-			if idx != -1 {
-				payload = strings.TrimSpace(payload[idx:strings.Index(payload, "(")])
-				tableNames = append(tableNames, payload)
-			}
-		}
-
-		return tableNames
+func (rootPage *Page) GetTableNames() ([]string, error) {
+	if rootPage.Header.Type != LeafTableBTreePage {
+		return nil, errors.New("page is not a root page")
 	}
 
 	var tableNames []string
-	for _, childPage := range page.Pages {
-		tableNames = append(tableNames, childPage.GetTableNames()...)
+	for _, table := range rootPage.Tables {
+		tableNames = append(tableNames, table.Name)
 	}
 
-	return tableNames
+	return tableNames, nil
 }
 
-func (page *Page) GetTablePageNumber(name string) (uint64, error) {
-	if page.Header.Type != LeafTableBTreePage {
-		return 0, errors.New("not a table page")
+func (rootPage *Page) GetTablePageNumber(name string) (int, error) {
+	if rootPage.Header.Type != LeafTableBTreePage {
+		return 0, errors.New("page is not a root page")
 	}
 
-	var pageNum uint64
-	tableNames := page.GetTableNames()
-	for i, tableName := range tableNames {
-		if strings.Trim(tableName, "\"") == name {
-			pageNum = page.Cells[i].RowID
-			break
+	for _, table := range rootPage.Tables {
+		if table.Name == name {
+			return table.PageNum, nil
 		}
 	}
 
-	return pageNum, nil
+	return -1, errors.New("page name not found")
 }
 
 func (page *Page) GetPageByName(name string) (*Page, error) {
@@ -414,73 +471,106 @@ func (page *Page) GetPageByName(name string) (*Page, error) {
 		return nil, err
 	}
 
-	offset := int64(pageNum) * int64(page.Size)
-	header := ReadHeader(offset, page.DbFile)
-	newPage := NewPage(page.Size, offset, pageNum, header)
-	newPage.DbFile = page.DbFile
-
+	newPage := TraverseBTree(page.DbFile, page.Size, uint64(pageNum))
 	return newPage, nil
 }
 
-func ReadRecord(numCols int, cell *Cell) error {
+func ReadRecord(buf []byte) *Record {
 	record := &Record{
 		Keys: make([][]uint8, 0),
 	}
 
 	// Read header size
-	headerSize, n := binary.Uvarint(cell.Payload)
+	headerSize, n := ReadVarInt(buf)
 	record.HeaderSize = headerSize
 
 	// Read column types
-	for range numCols {
-		colType, n1 := binary.Uvarint(cell.Payload[n:])
+	numCols := 0
+	for n < int(headerSize) {
+		colType, n1 := ReadVarInt(buf[n:])
 		record.ColumnTypes = append(record.ColumnTypes, colType)
 		n += n1
+		numCols++
 	}
 
-	// Read keys assuming they are strings
+	// Read keys
 	for i := range numCols {
-		if record.ColumnTypes[i] == 0 {
+		colType := record.ColumnTypes[i]
+		switch {
+		case colType == 0:
 			record.Keys = append(record.Keys, []byte{0})
 			continue
+		case colType == 1:
+			// Read 8-bit 2's complement integer
+			record.Keys = append(record.Keys, buf[n:n+1])
+			n++
+		case colType == 2:
+			// Read 16-bit big-endian integer
+			record.Keys = append(record.Keys, buf[n:n+2])
+			n += 2
+		case colType == 3:
+			// Read 24-bit big-endian integer
+			record.Keys = append(record.Keys, buf[n:n+3])
+			n += 3
+		case colType == 4:
+			// Read 32-bit big-endian integer
+			record.Keys = append(record.Keys, buf[n:n+4])
+			n += 4
+		case colType == 5:
+			// Read 48-bit big-endian integer
+			record.Keys = append(record.Keys, buf[n:n+6])
+			n += 6
+		case colType == 6:
+			// Read 64-bit big-endian integer
+			record.Keys = append(record.Keys, buf[n:n+8])
+			n += 8
+		case colType == 7:
+			// Read 64-bit IEEE floating point
+			record.Keys = append(record.Keys, buf[n:n+8])
+			n += 8
+		case colType == 8:
+			// Value is the integer 0
+			record.Keys = append(record.Keys, []byte{0})
+		case colType == 9:
+			// Value is the integer 1
+			record.Keys = append(record.Keys, []byte{1})
+		case colType == 10, colType == 11:
+			continue
+		case colType >= 12 && colType%2 == 0:
+			keyLen := (record.ColumnTypes[i] - 12) / 2
+			endIdx := min(int(keyLen)+n, len(buf))
+			record.Keys = append(record.Keys, buf[n:endIdx])
+			n += int(keyLen)
+		case colType >= 13 && colType%2 == 1:
+			keyLen := (record.ColumnTypes[i] - 13) / 2
+			endIdx := min(int(keyLen)+n, len(buf))
+			record.Keys = append(record.Keys, buf[n:endIdx])
+			n += int(keyLen)
 		}
-		keyLen := (record.ColumnTypes[i] - 13) / 2
-		record.Keys = append(record.Keys, cell.Payload[n:n+int(keyLen)])
-		n += int(keyLen)
 	}
 
-	cell.Record = record
-	return nil
+	return record
 }
 
-func (page *Page) GetTableColumns(name string) ([]string, error) {
-	if page.Header.Type != LeafTableBTreePage {
-		return nil, errors.New("not a table page")
+func (rootPage *Page) GetTableColumnNames(name string) ([]string, error) {
+	if rootPage.Header.Type != LeafTableBTreePage {
+		return nil, errors.New("page is not a root page")
 	}
 
-	tableNames := page.GetTableNames()
+	tableNames, err := rootPage.GetTableNames()
+	if err != nil {
+		return nil, err
+	}
+
 	var rowNum int
 	for i, tableName := range tableNames {
-		if strings.Trim(tableName, "\"") == name {
+		if tableName == name {
 			rowNum = i
 			break
 		}
 	}
 
-	payload := page.Cells[rowNum].Payload
-	payloadStr := string(payload)
-
-	startIdx := strings.Index(payloadStr, "(")
-	if startIdx == -1 {
-		return nil, errors.New("could not find columns")
-	}
-
-	columns := strings.Split(payloadStr[startIdx+1:strings.Index(payloadStr, ")")], ",")
-	for i, column := range columns {
-		columns[i] = strings.TrimSpace(column)
-	}
-
-	return columns, nil
+	return rootPage.Tables[rowNum].ColNames, nil
 }
 
 func (page *Page) GetTablebyName(name string) (*Page, error) {
@@ -493,22 +583,62 @@ func (page *Page) GetTablebyName(name string) (*Page, error) {
 		return nil, err
 	}
 
-	err = ReadCellPtrs(newPage)
-	if err != nil {
-		return nil, err
-	}
-
-	columns, err := page.GetTableColumns(name)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, cell := range newPage.Cells {
-		err = ReadRecord(len(columns), cell)
-		if err != nil {
-			return nil, err
-		}
-	}
-
 	return newPage, nil
+}
+
+func (page *Page) GetTableColumn(colNum int) []string {
+	if page.Header.Type == LeafTableBTreePage || page.Header.Type == LeafIndexBTreePage {
+		result := make([]string, 0)
+		for _, cell := range page.Cells {
+			if colNum == -1 {
+				result = append(result, strconv.Itoa(int(cell.RowID)))
+			} else {
+				result = append(result, string(cell.Record.Keys[colNum]))
+			}
+		}
+		return result
+	}
+
+	result := make([]string, 0)
+	for _, page := range page.Pages {
+		result = append(result, page.GetTableColumn(colNum)...)
+	}
+
+	return result
+
+}
+
+func (page *Page) GetTableColumns(colNames []string) [][]string {
+	if page.Header.Type == LeafTableBTreePage || page.Header.Type == LeafIndexBTreePage {
+		result := make([][]string, 0)
+		for _, cell := range page.Cells {
+			row := []string{}
+			for i, colName := range colNames {
+				if strings.Contains(colName, "id") {
+					row = append(row, strconv.Itoa(int(cell.RowID)))
+					continue
+				}
+				row = append(row, string(cell.Record.Keys[i]))
+			}
+			result = append(result, row)
+		}
+		return result
+	}
+
+	result := make([][]string, 0)
+	for _, page := range page.Pages {
+		result = append(result, page.GetTableColumns(colNames)...)
+	}
+	return result
+}
+
+func (page *Page) GetTableRowCount() int {
+	if page.Header.Type == LeafTableBTreePage || page.Header.Type == LeafIndexBTreePage {
+		return int(page.Header.CellCount)
+	}
+	count := 0
+	for _, page := range page.Pages {
+		count += page.GetTableRowCount()
+	}
+	return count
 }

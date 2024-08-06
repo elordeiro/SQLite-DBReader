@@ -16,8 +16,12 @@
                 "sample.db",
                 "select name, color from apples where color = 'Yellow'"
                 // "select name, color from apples"
-                // "args": ["superheroes.db", "select name from superheroes"]
             ]
+            // "args": [
+            //     "superheroes.db",
+            //     "select id, name from superheroes where eye_color = 'Blue Eyes'"
+            //     // "select name from superheroes where eye_color = 'Blue Eyes'"
+            // ]
         }
     ]
 }
