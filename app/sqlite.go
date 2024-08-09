@@ -30,12 +30,11 @@ const (
 // Schema Constants -----------------------------------------------------------
 /*
 CREATE TABLE sqlite_schema(
-
-type text,        -> Idx 0
-name text,        -> Idx 1
-tbl_name text,    -> Idx 2
-rootpage integer, -> Idx 3
-sql text          -> Idx 4
+	type text,        -> Idx 0
+	name text,        -> Idx 1
+	tbl_name text,    -> Idx 2
+	rootpage integer, -> Idx 3
+	sql text          -> Idx 4
 );
 */
 
@@ -53,6 +52,13 @@ type SQLite struct {
 	file     *os.File
 	pageSize int64
 	tables   []*Table
+}
+
+type Table struct {
+	Type     int
+	Name     string
+	PageNum  int64
+	ColNames []string
 }
 
 type NilFilter int

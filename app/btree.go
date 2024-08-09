@@ -52,13 +52,6 @@ type Record struct {
 	RowID       int64     // Part of Body -- Not present in table leaf cells
 }
 
-type Table struct {
-	Type     int
-	Name     string
-	PageNum  int64
-	ColNames []string
-}
-
 // ----------------------------------------------------------------------------
 
 // Parser functions -----------------------------------------------------------
