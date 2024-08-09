@@ -27,20 +27,41 @@ const (
 	TableTypeTrigger
 )
 
+// Schema Constants -----------------------------------------------------------
+/*
+CREATE TABLE sqlite_schema(
+
+type text,        -> Idx 0
+name text,        -> Idx 1
+tbl_name text,    -> Idx 2
+rootpage integer, -> Idx 3
+sql text          -> Idx 4
+);
+*/
+
 const (
 	SchemaTypeIdx     = 0
 	SchemaNameIdx     = 1
 	SchemaRootPageIdx = 3
 	SchemaTextIdx     = 4
-	IndexPageKeyIdx   = 0
-	IndexPageRowIdIdx = 1
 )
 
+// ----------------------------------------------------------------------------
+
+// Custom Types ---------------------------------------------------------------
 type SQLite struct {
 	file     *os.File
 	pageSize int64
 	tables   []*Table
 }
+
+type NilFilter int
+
+type Filter interface {
+	string | *[]uint64 | NilFilter
+}
+
+// ----------------------------------------------------------------------------
 
 func NewSQLite(databaseFilePath string) *SQLite {
 	// Open database file
@@ -88,11 +109,11 @@ func (db *SQLite) ParseSQLiteSchema() []*Table {
 		cell := &Cell{}
 
 		// Read payload size
-		payloadSize, n := ReadVarInt(pageBuf[off : off+MaxVarIntLen])
+		payloadSize, n := parseVarInt(pageBuf[off : off+MaxVarIntLen])
 		off += n
 
 		// Read row ID
-		_, n = ReadVarInt(pageBuf[off : off+MaxVarIntLen])
+		_, n = parseVarInt(pageBuf[off : off+MaxVarIntLen])
 		off += n
 
 		// Read Record
@@ -100,7 +121,7 @@ func (db *SQLite) ParseSQLiteSchema() []*Table {
 
 		// Append cell record to tables
 		tables = append(tables, &Table{
-			Type:     readTableType(cell.Record.Keys[SchemaTypeIdx]),
+			Type:     parseTableType(cell.Record.Keys[SchemaTypeIdx]),
 			Name:     string(cell.Record.Keys[SchemaNameIdx]),
 			PageNum:  int64(bytesToInt(cell.Record.Keys[SchemaRootPageIdx])),
 			ColNames: parseColNames(cell.Record.Keys[SchemaTextIdx]),
@@ -111,12 +132,7 @@ func (db *SQLite) ParseSQLiteSchema() []*Table {
 	return tables
 }
 
-type NilFilter int
-
-type Filter interface {
-	string | *[]uint64 | NilFilter
-}
-
+// TODO: Maybe split into 2 functions in order to simplify logic??
 func ParsePage[T Filter](db *SQLite, pageNum int64, filter T) *Page {
 	// Load page into memory
 	offset := db.calcOffset(pageNum)

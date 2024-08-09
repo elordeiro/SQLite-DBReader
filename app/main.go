@@ -13,6 +13,7 @@ func main() {
 	command := os.Args[2]
 
 	db := NewSQLite(databaseFilePath)
+	defer db.file.Close()
 
 	switch command {
 	case ".dbinfo":
@@ -36,6 +37,4 @@ func main() {
 			fmt.Println(res)
 		}
 	}
-
-	db.file.Close()
 }

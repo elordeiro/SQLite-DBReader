@@ -3,29 +3,26 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
-	"log"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
 )
 
-/*
-CREATE TABLE sqlite_schema(
-
-		type text,
-		name text,
-		tbl_name text,
-		rootpage integer,
-		sql text
-	  );
-*/
+// Constants ------------------------------------------------------------------
 
 const (
 	LCPLen       = 4 // Left child pointer length
 	MaxVarIntLen = 9 // Max length of an unsigned variable length integer
 )
 
+const (
+	IndexPageKeyIdx   = 0
+	IndexPageRowIdIdx = 1
+)
+
+// ----------------------------------------------------------------------------
+
+// Custom Types----------------------------------------------------------------
 type Page struct {
 	Header        *Header
 	CellPtrs      []int
@@ -62,12 +59,9 @@ type Table struct {
 	ColNames []string
 }
 
-/*
-Returns:
+// ----------------------------------------------------------------------------
 
-	Page type, cell count - for all headers
-	Right most pointer    - valid only for interior pages, else right most pointer is 0
-*/
+// Parser functions -----------------------------------------------------------
 func ParseHeader(buf []byte) *Header {
 	// Read page type
 	pageType := buf[0]
@@ -90,12 +84,6 @@ func ParseHeader(buf []byte) *Header {
 	}
 }
 
-/*
-Args:
-
-	page: page containing cell pointers
-	key: optional argument used for reading index pages
-*/
 func ParseCellPtrs(buf []byte, header *Header) []int {
 	// Read cell pointers
 	cellPtrs := make([]int, header.CellCount)
@@ -114,7 +102,6 @@ func ParseCellPtrs(buf []byte, header *Header) []int {
 	return cellPtrs
 }
 
-// Cell readers ---------------------------------------------------------------
 /*
 Table B-Tree Interior Cell (header 0x05):
 
@@ -133,14 +120,14 @@ func (page *Page) ParseInteriorTableCells(pageBuf []byte) {
 		off += LCPLen
 
 		// Read row ID
-		cell.RowID, _ = ReadVarInt(pageBuf[off:])
+		cell.RowID, _ = parseVarInt(pageBuf[off:])
 
 		// Append cell to page cells
 		page.Cells = append(page.Cells, cell)
 	}
 }
 
-// This function works simlilarly to ParseInteriorTableCells(), but also takes a []uint64 as a filter
+// This function works simlilarly to ParseInteriorTableCells(), but also takes a *[]uint64 as a filter
 func (page *Page) ParseInteriorTableCellsFiltered(pageBuf []byte, rowIDs *[]uint64) {
 	page.Cells = make([]*Cell, 0)
 	for i := 0; i < page.Header.CellCount; i++ {
@@ -153,7 +140,7 @@ func (page *Page) ParseInteriorTableCellsFiltered(pageBuf []byte, rowIDs *[]uint
 		off += LCPLen
 
 		// Read row ID
-		cell.RowID, _ = ReadVarInt(pageBuf[off:])
+		cell.RowID, _ = parseVarInt(pageBuf[off:])
 
 		// Append cell to page cells
 		if slices.ContainsFunc(*rowIDs, func(id uint64) bool {
@@ -184,12 +171,12 @@ func (page *Page) ParseLeafTableCells(pageBuf []byte) {
 		cell := &Cell{}
 
 		// Read payload size
-		payloadSize, n := ReadVarInt(pageBuf[off : off+MaxVarIntLen])
+		payloadSize, n := parseVarInt(pageBuf[off : off+MaxVarIntLen])
 		cell.PayloadSize = payloadSize
 		off += n
 
 		// Read row ID
-		rowID, n := ReadVarInt(pageBuf[off : off+MaxVarIntLen])
+		rowID, n := parseVarInt(pageBuf[off : off+MaxVarIntLen])
 		cell.RowID = rowID
 		off += n
 
@@ -201,7 +188,7 @@ func (page *Page) ParseLeafTableCells(pageBuf []byte) {
 	}
 }
 
-// This function works simlilarly to ParseLeafTableCells(), but also takes a []uint64 as a filter
+// This function works simlilarly to ParseLeafTableCells(), but also takes a *[]uint64 as a filter
 func (page *Page) ParseLeafTableCellsFiltered(pageBuf []byte, rowIDs *[]uint64) {
 	page.Cells = make([]*Cell, 0)
 	for i := 0; i < page.Header.CellCount; i++ {
@@ -210,12 +197,12 @@ func (page *Page) ParseLeafTableCellsFiltered(pageBuf []byte, rowIDs *[]uint64) 
 		cell := &Cell{}
 
 		// Read payload size
-		payloadSize, n := ReadVarInt(pageBuf[off : off+MaxVarIntLen])
+		payloadSize, n := parseVarInt(pageBuf[off : off+MaxVarIntLen])
 		cell.PayloadSize = payloadSize
 		off += n
 
 		// Read row ID
-		rowID, n := ReadVarInt(pageBuf[off : off+MaxVarIntLen])
+		rowID, n := parseVarInt(pageBuf[off : off+MaxVarIntLen])
 		cell.RowID = rowID
 		off += n
 
@@ -250,7 +237,7 @@ func (page *Page) ParseInteriorIndexCells(pageBuf []byte, key string) {
 		off += LCPLen
 
 		// Read payload size
-		payloadSize, n := ReadVarInt(pageBuf[off:])
+		payloadSize, n := parseVarInt(pageBuf[off:])
 		cell.PayloadSize = payloadSize
 		off += n
 
@@ -280,7 +267,7 @@ func (page *Page) ParseLeafIndexCells(pageBuf []byte, key string) {
 		cell := &Cell{}
 
 		// Read payload size
-		payloadSize, n := ReadVarInt(pageBuf[off:])
+		payloadSize, n := parseVarInt(pageBuf[off:])
 		cell.PayloadSize = payloadSize
 		off += n
 
@@ -295,87 +282,19 @@ func (page *Page) ParseLeafIndexCells(pageBuf []byte, key string) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-
-// Cell reader helpers --------------------------------------------------------
-// Big-endian
-func ReadVarInt(buf []byte) (uint64, int) {
-	result := uint64(0)
-	for i, b := range buf {
-		result <<= 7
-		result |= uint64(b & 0x7f)
-		if b&0x80 == 0 {
-			return result, i + 1
-		}
-	}
-	return result, 0
-}
-
-func ReadVarIntFromFile(file *os.File) uint64 {
-	result := uint64(0)
-	for {
-		b := make([]byte, 1)
-		_, err := file.Read(b)
-		if err != nil {
-			log.Fatal(err)
-		}
-		result <<= 7
-		result |= uint64(b[0] & 0x7f)
-		if b[0]&0x80 == 0 {
-			break
-		}
-	}
-	return result
-}
-
-func readTableType(typ []uint8) int {
-	switch string(typ) {
-	case "table":
-		return TableTypeTable
-	case "index":
-		return TableTypeIndex
-	case "view":
-		return TableTypeView
-	case "trigger":
-		return TableTypeTrigger
-	default:
-		return 0
-	}
-}
-
-func bytesToInt(bytes []byte) uint64 {
-	var result uint64
-	for _, b := range bytes {
-		result = (result << 8) | uint64(b)
-	}
-	return result
-}
-
-func parseColNames(bytes []byte) []string {
-	exprStr := string(bytes)
-	insideExpr := exprStr[strings.Index(exprStr, "(")+1 : strings.Index(exprStr, ")")]
-	result := strings.Split(insideExpr, ",")
-	for i, res := range result {
-		result[i] = strings.TrimSpace(res)
-	}
-	return result
-}
-
-// ----------------------------------------------------------------------------
-
 func ReadRecord(buf []byte) *Record {
 	record := &Record{
 		Keys: make([][]uint8, 0),
 	}
 
 	// Read header size
-	headerSize, n := ReadVarInt(buf)
+	headerSize, n := parseVarInt(buf)
 	record.HeaderSize = int(headerSize)
 
 	// Read column types
 	numCols := 0
 	for n < record.HeaderSize {
-		colType, n1 := ReadVarInt(buf[n:])
+		colType, n1 := parseVarInt(buf[n:])
 		record.ColumnTypes = append(record.ColumnTypes, colType)
 		n += n1
 		numCols++
@@ -440,6 +359,57 @@ func ReadRecord(buf []byte) *Record {
 	return record
 }
 
+// ----------------------------------------------------------------------------
+
+// Cell parser helpers --------------------------------------------------------
+// Big-endian
+func parseVarInt(buf []byte) (uint64, int) {
+	result := uint64(0)
+	for i, b := range buf {
+		result <<= 7
+		result |= uint64(b & 0x7f)
+		if b&0x80 == 0 {
+			return result, i + 1
+		}
+	}
+	return result, 0
+}
+
+func bytesToInt(bytes []byte) uint64 {
+	var result uint64
+	for _, b := range bytes {
+		result = (result << 8) | uint64(b)
+	}
+	return result
+}
+
+func parseTableType(typ []uint8) int {
+	switch string(typ) {
+	case "table":
+		return TableTypeTable
+	case "index":
+		return TableTypeIndex
+	case "view":
+		return TableTypeView
+	case "trigger":
+		return TableTypeTrigger
+	default:
+		return 0
+	}
+}
+
+func parseColNames(bytes []byte) []string {
+	exprStr := string(bytes)
+	insideExpr := exprStr[strings.Index(exprStr, "(")+1 : strings.Index(exprStr, ")")]
+	result := strings.Split(insideExpr, ",")
+	for i, res := range result {
+		result[i] = strings.TrimSpace(res)
+	}
+	return result
+}
+
+// ----------------------------------------------------------------------------
+
 // Getters --------------------------------------------------------------------
 func (page *Page) GetAllRows(colNames []string) [][]string {
 	if page.Header.Type == LeafTablePage || page.Header.Type == LeafIndexPage {
@@ -468,7 +438,7 @@ func (page *Page) GetAllRows(colNames []string) [][]string {
 func (page *Page) GetFilteredRowIDs() []uint64 {
 	result := make([]uint64, 0)
 	for _, cell := range page.FilteredCells {
-		rowId := bytesToInt(cell.Record.Keys[1])
+		rowId := bytesToInt(cell.Record.Keys[IndexPageRowIdIdx])
 		result = append(result, rowId)
 	}
 
@@ -478,7 +448,4 @@ func (page *Page) GetFilteredRowIDs() []uint64 {
 	return result
 }
 
-// ----------------------------------------------------------------------------
-
-// Getter Helpers -------------------------------------------------------------
 // ----------------------------------------------------------------------------
