@@ -12,14 +12,14 @@ func main() {
 	databaseFilePath := os.Args[1]
 	command := os.Args[2]
 
-	rootPage := ReadDatabaseFile(databaseFilePath)
+	db := NewSQLite(databaseFilePath)
 
 	switch command {
 	case ".dbinfo":
-		fmt.Printf("database page size: %v\n", rootPage.GetPageSize())
-		fmt.Printf("number of tables: %v\n", rootPage.GetTableCount())
+		fmt.Printf("database page size: %v\n", db.GetPageSize())
+		fmt.Printf("number of tables: %v\n", db.GetTableCount())
 	case ".tables":
-		tables, _ := rootPage.GetTableNames()
+		tables := db.GetTableNames()
 		for _, table := range tables {
 			if strings.Contains(table, "sqlite_") {
 				continue
@@ -28,7 +28,7 @@ func main() {
 		}
 		fmt.Println()
 	default:
-		result, err := rootPage.HandleCommand(command)
+		result, err := HandleCommand(command, db)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -37,5 +37,5 @@ func main() {
 		}
 	}
 
-	rootPage.DbFile.Close()
+	db.file.Close()
 }

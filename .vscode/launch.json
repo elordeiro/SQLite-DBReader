@@ -12,15 +12,19 @@
             "program": "${workspaceFolder}/app",
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
+            // "args": [
+            //     "companies.db",
+            //     "SELECT id, name FROM companies WHERE country = 'eritrea'"
+            // ]
             "args": [
                 "sample.db",
-                "select name, color from apples where color = 'Yellow'"
-                // "select name, color from apples"
+                // "select * from apples"
+                "select name from apples"
             ]
             // "args": [
             //     "superheroes.db",
             //     "select id, name from superheroes where eye_color = 'Blue Eyes'"
-            //     // "select name from superheroes where eye_color = 'Blue Eyes'"
+            // "select name from superheroes where eye_color = 'Blue Eyes'"
             // ]
         }
     ]
