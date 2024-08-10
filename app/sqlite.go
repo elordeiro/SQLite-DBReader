@@ -61,11 +61,39 @@ type Table struct {
 	ColNames []string
 }
 
-type NilFilter int
+// ----------------------------------------------------------------------------
 
+// Filters---------------------------------------------------------------------
 type Filter interface {
-	string | *[]uint64 | NilFilter
+	FilterCell(any) bool
 }
+
+type TableFilter struct {
+	rowIds *[]uint64
+}
+
+type IndexFilter struct {
+	key string
+}
+
+type NilFilter struct{}
+
+func (tb TableFilter) FilterCell(a any) bool {
+	cellRowID := any(a).(uint64)
+	for _, id := range *tb.rowIds {
+		if id <= cellRowID {
+			return true
+		}
+	}
+	return false
+}
+
+func (tb IndexFilter) PassesFilter(a any) bool {
+	key := any(a).(string)
+	return tb.key == key
+}
+
+func (tb NilFilter) FilterCell(a any) bool { return true }
 
 // ----------------------------------------------------------------------------
 
@@ -115,11 +143,11 @@ func (db *SQLite) ParseSQLiteSchema() []*Table {
 		cell := &Cell{}
 
 		// Read payload size
-		payloadSize, n := parseVarInt(pageBuf[off : off+MaxVarIntLen])
+		payloadSize, n := parseVarInt(pageBuf[off:])
 		off += n
 
 		// Read row ID
-		_, n = parseVarInt(pageBuf[off : off+MaxVarIntLen])
+		_, n = parseVarInt(pageBuf[off:])
 		off += n
 
 		// Read Record
@@ -138,8 +166,7 @@ func (db *SQLite) ParseSQLiteSchema() []*Table {
 	return tables
 }
 
-// TODO: Maybe split into 2 functions in order to simplify logic??
-func ParsePage[T Filter](db *SQLite, pageNum int64, filter T) *Page {
+func (db *SQLite) ParseTablePage(pageNum int64, filter Filter) *Page {
 	// Load page into memory
 	offset := db.calcOffset(pageNum)
 	pageBuf := make([]byte, db.pageSize)
@@ -153,44 +180,48 @@ func ParsePage[T Filter](db *SQLite, pageNum int64, filter T) *Page {
 		CellPtrs: cellPtrs,
 	}
 
-	switch header.Type {
-	case LeafTablePage:
-		switch f := any(filter).(type) {
-		case NilFilter:
-			page.ParseLeafTableCells(pageBuf)
-		case *[]uint64:
-			if len(*f) == 0 {
-				return page
-			}
-			page.ParseLeafTableCellsFiltered(pageBuf, f)
+	if header.Type == LeafTablePage {
+		page.ParseLeafTableCells(pageBuf, filter)
+		return page
+	}
+
+	page.ParseInteriorTableCells(pageBuf, filter)
+
+	for _, cell := range page.Cells {
+		childPage := db.ParseTablePage(int64(cell.LeftChildPointer), filter)
+		page.Pages = append(page.Pages, childPage)
+		if f, ok := filter.(TableFilter); ok && len(*f.rowIds) == 0 {
+			break
 		}
-	case LeafIndexPage:
-		page.ParseLeafIndexCells(pageBuf, any(filter).(string))
-	case InteriorTablePage:
-		switch f := any(filter).(type) {
-		case NilFilter:
-			page.ParseInteriorTableCells(pageBuf)
-		case *[]uint64:
-			if len(*f) == 0 {
-				return page
-			}
-			page.ParseInteriorTableCellsFiltered(pageBuf, f)
-		}
-		page.Pages = make([]*Page, 0)
-		for _, cell := range page.Cells {
-			childPage := ParsePage(db, int64(cell.LeftChildPointer), filter)
-			page.Pages = append(page.Pages, childPage)
-			if f, ok := any(filter).(*[]uint64); ok && len(*f) == 0 {
-				break
-			}
-		}
-	case InteriorIndexPage:
-		page.ParseInteriorIndexCells(pageBuf, any(filter).(string))
-		page.Pages = make([]*Page, 0)
-		for _, cell := range page.Cells {
-			childPage := ParsePage(db, int64(cell.LeftChildPointer), filter)
-			page.Pages = append(page.Pages, childPage)
-		}
+	}
+
+	return page
+}
+
+func (db *SQLite) ParseIndexPage(pageNum int64, filter IndexFilter) *Page {
+	// Load page into memory
+	offset := db.calcOffset(pageNum)
+	pageBuf := make([]byte, db.pageSize)
+	db.file.ReadAt(pageBuf, offset)
+
+	header := ParseHeader(pageBuf[0:MaxHeaderLen])
+	cellPtrs := ParseCellPtrs(pageBuf, header)
+
+	page := &Page{
+		Header:   header,
+		CellPtrs: cellPtrs,
+	}
+
+	if header.Type == LeafIndexPage {
+		page.ParseLeafIndexCells(pageBuf, filter)
+		return page
+	}
+
+	page.ParseInteriorIndexCells(pageBuf, filter)
+
+	for _, cell := range page.Cells {
+		childPage := db.ParseIndexPage(int64(cell.LeftChildPointer), filter)
+		page.Pages = append(page.Pages, childPage)
 	}
 
 	return page
@@ -233,16 +264,16 @@ func (db *SQLite) GetRootPageByName(name string, filter ...any) (*Page, error) {
 	var newPage *Page
 	if len(filter) == 0 {
 		var nf NilFilter
-		newPage = ParsePage(db, pageNum, nf)
+		newPage = db.ParseTablePage(pageNum, nf)
 		return newPage, nil
 	}
 
 	switch f := any(filter[0]).(type) {
 	case string:
-		newPage = ParsePage(db, pageNum, f)
+		newPage = db.ParseIndexPage(pageNum, IndexFilter{f})
 	case []uint64:
 		slices.Sort(f)
-		newPage = ParsePage(db, pageNum, &f)
+		newPage = db.ParseTablePage(pageNum, TableFilter{&f})
 	default:
 		return nil, errors.New("filter type must be string or []uint64")
 	}

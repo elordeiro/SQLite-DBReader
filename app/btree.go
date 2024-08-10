@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
-	"slices"
 	"strconv"
 	"strings"
 )
@@ -11,8 +10,7 @@ import (
 // Constants ------------------------------------------------------------------
 
 const (
-	LCPLen       = 4 // Left child pointer length
-	MaxVarIntLen = 9 // Max length of an unsigned variable length integer
+	LCPLen = 4 // Left child pointer length
 )
 
 const (
@@ -41,7 +39,6 @@ type Cell struct {
 	LeftChildPointer uint32 // Used for: TableInteriorCell, IndexInteriorCell
 	RowID            uint64 // Used for: TableLeafCell, TableInteriorCell
 	PayloadSize      uint64 // Used for: TableLeafCell, IndexLeafCell, IndexInteriorCell
-	Payload          []byte // Used for: TableLeafCell, IndexLeafCell, IndexInteriorCell
 	Record           *Record
 }
 
@@ -49,7 +46,6 @@ type Record struct {
 	HeaderSize  int       // Part of Header
 	ColumnTypes []uint64  // Part of Header
 	Keys        [][]uint8 // Part of Body
-	RowID       int64     // Part of Body -- Not present in table leaf cells
 }
 
 // ----------------------------------------------------------------------------
@@ -101,8 +97,7 @@ Table B-Tree Interior Cell (header 0x05):
 	A 4-byte big-endian page number which is the left child pointer.
 	A varint which is the integer key
 */
-func (page *Page) ParseInteriorTableCells(pageBuf []byte) {
-	page.Cells = make([]*Cell, 0)
+func (page *Page) ParseInteriorTableCells(pageBuf []byte, filter Filter) {
 	for i := 0; i < page.Header.CellCount; i++ {
 		off := page.CellPtrs[i]
 
@@ -116,29 +111,7 @@ func (page *Page) ParseInteriorTableCells(pageBuf []byte) {
 		cell.RowID, _ = parseVarInt(pageBuf[off:])
 
 		// Append cell to page cells
-		page.Cells = append(page.Cells, cell)
-	}
-}
-
-// This function works simlilarly to ParseInteriorTableCells(), but also takes a *[]uint64 as a filter
-func (page *Page) ParseInteriorTableCellsFiltered(pageBuf []byte, rowIDs *[]uint64) {
-	page.Cells = make([]*Cell, 0)
-	for i := 0; i < page.Header.CellCount; i++ {
-		off := page.CellPtrs[i]
-
-		cell := &Cell{}
-
-		// Read left child pointer
-		binary.Read(bytes.NewReader(pageBuf[off:off+LCPLen]), binary.BigEndian, &cell.LeftChildPointer)
-		off += LCPLen
-
-		// Read row ID
-		cell.RowID, _ = parseVarInt(pageBuf[off:])
-
-		// Append cell to page cells
-		if slices.ContainsFunc(*rowIDs, func(id uint64) bool {
-			return id <= cell.RowID
-		}) {
+		if filter.FilterCell(cell.RowID) {
 			page.Cells = append(page.Cells, cell)
 		}
 	}
@@ -156,56 +129,30 @@ Table B-Tree Leaf Cell (header 0x0d):
 	The initial portion of the payload that does not spill to overflow pages.
 	A 4-byte big-endian integer page number for the first page of the overflow page list - omitted if all payload fits on the b-tree page.
 */
-func (page *Page) ParseLeafTableCells(pageBuf []byte) {
-	page.Cells = make([]*Cell, 0)
+func (page *Page) ParseLeafTableCells(pageBuf []byte, filter Filter) {
 	for i := 0; i < page.Header.CellCount; i++ {
 		off := page.CellPtrs[i]
 
 		cell := &Cell{}
 
 		// Read payload size
-		payloadSize, n := parseVarInt(pageBuf[off : off+MaxVarIntLen])
+		payloadSize, n := parseVarInt(pageBuf[off:])
 		cell.PayloadSize = payloadSize
 		off += n
 
 		// Read row ID
-		rowID, n := parseVarInt(pageBuf[off : off+MaxVarIntLen])
-		cell.RowID = rowID
+		cell.RowID, n = parseVarInt(pageBuf[off:])
 		off += n
 
 		// Read Record
 		cell.Record = ReadRecord(pageBuf[off : off+int(payloadSize)])
 
 		// Append cell to page cells
-		page.Cells = append(page.Cells, cell)
-	}
-}
-
-// This function works simlilarly to ParseLeafTableCells(), but also takes a *[]uint64 as a filter
-func (page *Page) ParseLeafTableCellsFiltered(pageBuf []byte, rowIDs *[]uint64) {
-	page.Cells = make([]*Cell, 0)
-	for i := 0; i < page.Header.CellCount; i++ {
-		off := page.CellPtrs[i]
-
-		cell := &Cell{}
-
-		// Read payload size
-		payloadSize, n := parseVarInt(pageBuf[off : off+MaxVarIntLen])
-		cell.PayloadSize = payloadSize
-		off += n
-
-		// Read row ID
-		rowID, n := parseVarInt(pageBuf[off : off+MaxVarIntLen])
-		cell.RowID = rowID
-		off += n
-
-		// Read Record
-		cell.Record = ReadRecord(pageBuf[off : off+int(payloadSize)])
-
-		// Append cell to page cells
-		if slices.Contains(*rowIDs, cell.RowID) {
+		if filter.FilterCell(cell.RowID) {
+			if f, ok := filter.(TableFilter); ok {
+				*f.rowIds = (*f.rowIds)[1:]
+			}
 			page.Cells = append(page.Cells, cell)
-			*rowIDs = (*rowIDs)[1:]
 		}
 	}
 }
@@ -218,8 +165,7 @@ Index B-Tree Interior Cell (header 0x02):
 	The initial portion of the payload that does not spill to overflow pages.
 	A 4-byte big-endian integer page number for the first page of the overflow page list - omitted if all payload fits on the b-tree page.
 */
-func (page *Page) ParseInteriorIndexCells(pageBuf []byte, key string) {
-	page.Cells = make([]*Cell, 0)
+func (page *Page) ParseInteriorIndexCells(pageBuf []byte, filter IndexFilter) {
 	for i := 0; i < page.Header.CellCount; i++ {
 		off := page.CellPtrs[i]
 
@@ -239,7 +185,7 @@ func (page *Page) ParseInteriorIndexCells(pageBuf []byte, key string) {
 
 		// Append cell to page cells
 		page.Cells = append(page.Cells, cell)
-		if string(cell.Record.Keys[IndexPageKeyIdx]) == key {
+		if filter.PassesFilter(string(cell.Record.Keys[IndexPageKeyIdx])) {
 			page.FilteredCells = append(page.FilteredCells, cell)
 		}
 	}
@@ -252,8 +198,7 @@ Index B-Tree Leaf Cell (header 0x0a):
 	The initial portion of the payload that does not spill to overflow pages.
 	A 4-byte big-endian integer page number for the first page of the overflow page list - omitted if all payload fits on the b-tree page.
 */
-func (page *Page) ParseLeafIndexCells(pageBuf []byte, key string) {
-	page.Cells = make([]*Cell, 0)
+func (page *Page) ParseLeafIndexCells(pageBuf []byte, filter IndexFilter) {
 	for i := 0; i < page.Header.CellCount; i++ {
 		off := page.CellPtrs[i]
 
@@ -269,7 +214,7 @@ func (page *Page) ParseLeafIndexCells(pageBuf []byte, key string) {
 
 		// Append cell to page cells
 		page.Cells = append(page.Cells, cell)
-		if string(cell.Record.Keys[IndexPageKeyIdx]) == key {
+		if filter.PassesFilter(string(cell.Record.Keys[IndexPageKeyIdx])) {
 			page.FilteredCells = append(page.FilteredCells, cell)
 		}
 	}
