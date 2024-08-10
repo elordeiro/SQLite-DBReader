@@ -65,7 +65,7 @@ type Table struct {
 
 // Filters---------------------------------------------------------------------
 type Filter interface {
-	FilterCell(any) bool
+	FilterCell(*Cell) bool
 }
 
 type TableFilter struct {
@@ -78,22 +78,20 @@ type IndexFilter struct {
 
 type NilFilter struct{}
 
-func (tb TableFilter) FilterCell(a any) bool {
-	cellRowID := any(a).(uint64)
-	for _, id := range *tb.rowIds {
-		if id <= cellRowID {
+func (tf TableFilter) FilterCell(c *Cell) bool {
+	for _, id := range *tf.rowIds {
+		if id <= c.RowID {
 			return true
 		}
 	}
 	return false
 }
 
-func (tb IndexFilter) PassesFilter(a any) bool {
-	key := any(a).(string)
-	return tb.key == key
+func (idf IndexFilter) FilterCell(c *Cell) bool {
+	return idf.key == string(c.Record.Keys[IndexPageKeyIdx])
 }
 
-func (tb NilFilter) FilterCell(a any) bool { return true }
+func (nf NilFilter) FilterCell(c *Cell) bool { return true }
 
 // ----------------------------------------------------------------------------
 

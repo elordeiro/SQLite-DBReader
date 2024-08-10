@@ -111,7 +111,7 @@ func (page *Page) ParseInteriorTableCells(pageBuf []byte, filter Filter) {
 		cell.RowID, _ = parseVarInt(pageBuf[off:])
 
 		// Append cell to page cells
-		if filter.FilterCell(cell.RowID) {
+		if filter.FilterCell(cell) {
 			page.Cells = append(page.Cells, cell)
 		}
 	}
@@ -148,7 +148,7 @@ func (page *Page) ParseLeafTableCells(pageBuf []byte, filter Filter) {
 		cell.Record = ReadRecord(pageBuf[off : off+int(payloadSize)])
 
 		// Append cell to page cells
-		if filter.FilterCell(cell.RowID) {
+		if filter.FilterCell(cell) {
 			if f, ok := filter.(TableFilter); ok {
 				*f.rowIds = (*f.rowIds)[1:]
 			}
@@ -185,7 +185,7 @@ func (page *Page) ParseInteriorIndexCells(pageBuf []byte, filter IndexFilter) {
 
 		// Append cell to page cells
 		page.Cells = append(page.Cells, cell)
-		if filter.PassesFilter(string(cell.Record.Keys[IndexPageKeyIdx])) {
+		if filter.FilterCell(cell) {
 			page.FilteredCells = append(page.FilteredCells, cell)
 		}
 	}
@@ -214,7 +214,7 @@ func (page *Page) ParseLeafIndexCells(pageBuf []byte, filter IndexFilter) {
 
 		// Append cell to page cells
 		page.Cells = append(page.Cells, cell)
-		if filter.PassesFilter(string(cell.Record.Keys[IndexPageKeyIdx])) {
+		if filter.FilterCell(cell) {
 			page.FilteredCells = append(page.FilteredCells, cell)
 		}
 	}
@@ -350,8 +350,8 @@ func parseColNames(bytes []byte) []string {
 
 // Getters --------------------------------------------------------------------
 func (page *Page) GetAllRows(colNames []string) [][]string {
+	result := make([][]string, 0)
 	if page.Header.Type == LeafTablePage || page.Header.Type == LeafIndexPage {
-		result := make([][]string, 0)
 		for _, cell := range page.Cells {
 			row := []string{}
 			for i, colName := range colNames {
@@ -366,7 +366,6 @@ func (page *Page) GetAllRows(colNames []string) [][]string {
 		return result
 	}
 
-	result := make([][]string, 0)
 	for _, page := range page.Pages {
 		result = append(result, page.GetAllRows(colNames)...)
 	}
